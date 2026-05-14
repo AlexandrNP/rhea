@@ -33,3 +33,5 @@ pytest.xml
 
 # Site HTML
 site/
+# Parsl local-backend worker run dirs (rhea-workers/block-*)
+rhea-workers/

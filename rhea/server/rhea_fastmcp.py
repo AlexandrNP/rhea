@@ -228,7 +228,33 @@ class RheaToolManager(ToolManager):
     ):
         if context is None:
             raise RuntimeError(f"'context' is None")
-        tool = self.get_tool(name)
+
+        # Resolution order MUST mirror list_tools(): session-scoped tools
+        # FIRST. ``find_tools`` populates the matched tools into the
+        # caller's session via add_tool_to_context -> client_state._tools
+        # (keyed by the sanitized MCP tool name). list_tools() reads that
+        # session bucket, so a tool that appears in tools/list lives
+        # there — but the inherited get_tool() only checks the GLOBAL
+        # self._tools and would miss it, making a just-discovered tool
+        # un-callable ("Unknown tool"). Check the session bucket first.
+        tool = None
+        request: Any | None = context.request_context.request
+        if request is not None:
+            session_id: str | None = request.headers.get("mcp-session-id")
+            if session_id is not None:
+                client_manager: ClientManager = (
+                    context.request_context.lifespan_context.client_manager  # type: ignore
+                )
+                client_state: ClientState = client_manager.get_client_state(session_id)
+                tool = client_state._tools.get(name)
+
+        # Then global tools, then the DB fallback (by the GalaxyTool
+        # name — note this only matches when the requested name equals
+        # the stored GalaxyTool.name, not the sanitized MCP name; the
+        # session-scoped lookup above is the path find_tools-discovered
+        # tools actually take).
+        if tool is None:
+            tool = self.get_tool(name)
         if not tool:
             db_sessionmaker: async_sessionmaker[AsyncSession] = (
                 context.request_context.lifespan_context.db_sessionmaker  # type: ignore

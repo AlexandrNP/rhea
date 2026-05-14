@@ -268,12 +268,31 @@ class RheaToolAgent(Agent):
                     for i in range(1, len(parts)):
                         nested_key = parts[i]
                         if isinstance(current, GalaxyVar):
-                            if nested_key not in current._nested:
+                            # Do NOT inject a placeholder nested key when
+                            # this GalaxyVar already wraps a real scalar
+                            # value. A scalar param (e.g. a select) wraps
+                            # its value directly; ``$param.value`` is the
+                            # Galaxy idiom for "that same value" and is
+                            # handled by GalaxyVar.__getattr__. Injecting
+                            # ``_nested["value"] = ""`` here would shadow
+                            # that and render empty — which silently
+                            # turned MUSCLE's ``-${outputFormat.value}out``
+                            # into ``-out`` instead of ``-fastaout``.
+                            wraps_scalar = (
+                                not isinstance(current._value, dict)
+                                and current._value not in (None, "")
+                            )
+                            if nested_key not in current._nested and not wraps_scalar:
                                 if i == len(parts) - 1:
                                     current.set_nested(nested_key, "")
                                 else:
                                     current.set_nested(nested_key, GalaxyVar({}))
-                            current = current._nested[nested_key]
+                            if nested_key in current._nested:
+                                current = current._nested[nested_key]
+                            else:
+                                # scalar param: ``.value`` resolves via
+                                # __getattr__ at render time — stop here.
+                                break
 
         # Ensure the template sees real callables/modules, not variables from env
         context["json"] = json
@@ -397,14 +416,26 @@ class RheaToolAgent(Agent):
                 else:
                     value = param.falsevalue
                 env[param.name] = value
+                env[f"{param.name}_value"] = value
             elif isinstance(param, RheaTextParam):
                 env[param.name] = param.value
+                env[f"{param.name}_value"] = param.value
             elif isinstance(param, RheaIntegerParam):
                 env[param.name] = str(param.value)
+                env[f"{param.name}_value"] = str(param.value)
             elif isinstance(param, RheaFloatParam):
                 env[param.name] = str(param.value)
+                env[f"{param.name}_value"] = str(param.value)
             elif isinstance(param, RheaSelectParam):
                 env[param.name] = param.value
+                # Galaxy Cheetah idiom: for a simple-value param, $param
+                # and $param.value are the same selected value. The
+                # command renderer's replace_dotted_vars rewrites
+                # $param.value -> $param_value, so that alias must be
+                # populated too — otherwise e.g. MUSCLE's
+                # "-${outputFormat.value}out" silently renders "-out"
+                # instead of "-fastaout".
+                env[f"{param.name}_value"] = param.value
             elif isinstance(param, RheaMultiSelectParam):
                 values = []
                 for p in param.values:

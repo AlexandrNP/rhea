@@ -78,7 +78,11 @@ class Settings(BaseSettings):
     client_ttl: int = 3600
 
     # Parsl configuration
-    parsl_container_backend: Literal["docker", "podman"] = "docker"
+    # "local" runs the Parsl worker as a plain local subprocess of the
+    # server (no container) — required on Docker Desktop for Mac, where
+    # a sibling worker container cannot reach the interchange. See
+    # rhea/manager/parsl_config.py::generate_parsl_config.
+    parsl_container_backend: Literal["docker", "podman", "local"] = "docker"
     parsl_container_network: Literal["host", "local"] = "host"
     parsl_container_debug: bool = False
     parsl_max_workers_per_node: int = 1
@@ -108,6 +112,14 @@ class Settings(BaseSettings):
     minio_endpoint: str = "localhost"
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
+
+    # Galaxy ToolShed — the upstream source for Rhea's tool registry.
+    # rhea/preprocess/utils/fetch.py queries this ToolShed's
+    # /api/repositories and /repos/<owner>/<name> endpoints. Configurable
+    # so the fork can point at a private / mirror / test ToolShed (e.g.
+    # https://testtoolshed.g2.bx.psu.edu) without a code change. Read
+    # from $GALAXY_TOOLSHED_URL or the .env file like every other Setting.
+    galaxy_toolshed_url: str = "https://toolshed.g2.bx.psu.edu"
 
 
 class PBSSettings(BaseSettings):

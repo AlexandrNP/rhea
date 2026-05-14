@@ -107,6 +107,15 @@ class GalaxyVar:
         v = self._value
         if isinstance(v, Mapping) and name in v:
             return self._wrap(v[name])
+        # Galaxy Cheetah idiom: for a simple-value param, ``$param.value``
+        # IS ``$param`` — ``.value`` accesses nothing, it just yields the
+        # same value. Without this, ``${param.value}`` on a scalar-
+        # wrapping GalaxyVar falls through to the empty-GalaxyVar
+        # fallback below and renders as "" — e.g. MUSCLE's
+        # ``-${outputFormat.value}out`` silently became ``-out`` instead
+        # of ``-fastaout``, producing an empty FASTA output file.
+        if name == "value":
+            return self
         if hasattr(v, name):
             return getattr(v, name)
         return GalaxyVar({})
@@ -121,6 +130,14 @@ class GalaxyVar:
             isinstance(key, int) or isinstance(key, slice)
         ):
             return v[key]
+        # Galaxy Cheetah idiom: ``$param.value`` IS ``$param`` for a
+        # scalar param. Cheetah's NameMapper treats GalaxyVar as
+        # mapping-like (it has __getitem__/__len__/__contains__) and
+        # resolves the ``.value`` segment via __getitem__, NOT
+        # __getattr__ — so the same idiom must be honored here or
+        # ``${outputFormat.value}`` renders as an empty GalaxyVar.
+        if key == "value":
+            return self
         try:
             return v[key]
         except Exception:
@@ -147,6 +164,11 @@ class GalaxyVar:
         v = self._value
         if isinstance(v, Mapping):
             return item in v
+        # ``.value`` is always resolvable on a scalar GalaxyVar (it
+        # yields the value itself) — Cheetah's NameMapper may probe
+        # __contains__ before __getitem__.
+        if item == "value":
+            return True
         try:
             return item in v
         except TypeError:
@@ -166,6 +188,8 @@ class GalaxyVar:
         v = self._value
         if isinstance(v, Mapping) and key in v:
             return self._wrap(v[key])
+        if key == "value":
+            return self
         return default if default is not None else GalaxyVar("")
 
 

@@ -78,7 +78,7 @@ podman_cmd = (
 
 
 def generate_parsl_config(
-    backend: Literal["docker", "podman"] = "docker",
+    backend: Literal["docker", "podman", "local"] = "docker",
     network: Literal["host", "local"] = "host",
     provider: Literal["local", "pbs", "k8"] = "local",
     max_workers_per_node: int = 1,
@@ -92,7 +92,29 @@ def generate_parsl_config(
     k8_settings: Optional[K8Settings] = None,
 ) -> Config:
     """
-    Generate Parsl config for Docker executor
+    Generate Parsl config for the Rhea worker executor.
+
+    ``backend`` selects how the Parsl ``process_worker_pool`` worker is
+    launched:
+
+    * ``"docker"`` / ``"podman"`` — the worker runs inside a
+      ``rhea-worker-agent`` container, launched via a ``WrappedLauncher``
+      that prepends a ``docker run`` / ``podman run`` command. This is
+      the production HPC shape, but it FAILS on Docker Desktop for Mac:
+      the worker container is a *sibling* on the host's daemon, does NOT
+      share the server's network namespace, and ``--network host`` is a
+      no-op on macOS — so the worker cannot reach the interchange and
+      Parsl reports "Never received handle from Parsl worker".
+
+    * ``"local"`` — the worker runs as a plain LOCAL SUBPROCESS of the
+      server process (Parsl's standard single-machine config: a
+      ``LocalProvider`` with the default ``SingleNodeLauncher`` and the
+      default ``process_worker_pool`` launch command). The worker
+      shares the server's network namespace, so there is no
+      interchange-connectivity problem at all. Requirements move to the
+      *server's* environment: it must have ``conda`` on PATH (the
+      ``RheaToolAgent`` builds per-tool conda envs) and reach Redis.
+      Use this for a single-machine / laptop deployment.
     """
 
     debug_port = "-p 5680:5680 " if debug and network == "local" else ""
@@ -102,6 +124,10 @@ def generate_parsl_config(
     local_flag = "--add-host=host.docker.internal:host-gateway "
     host_flag = "--network host "
 
+    # ``prepend`` is the WrappedLauncher prefix for container backends;
+    # for the "local" backend there is no prefix — the worker is a
+    # direct local subprocess.
+    prepend: Optional[str]
     if backend == "docker":
         prepend = docker_cmd.format(
             debug_port=debug_port,
@@ -114,6 +140,8 @@ def generate_parsl_config(
             network_flag=host_flag if network == "host" else local_flag,
             docker_image=DOCKER_IMAGE,
         )
+    elif backend == "local":
+        prepend = None
     else:
         raise ValueError(f"Backend '{backend}' not supported")
 
@@ -143,14 +171,27 @@ def generate_parsl_config(
     )
 
     if provider == "local":
-        parsl_provider = LocalProvider(
-            launcher=WrappedLauncher(prepend=prepend),  # type: ignore
-            init_blocks=init_blocks,
-            min_blocks=min_blocks,
-            max_blocks=max_blocks,
-            nodes_per_block=nodes_per_block,
-            parallelism=parallelism,
-        )
+        if backend == "local":
+            # Plain local subprocess worker: default SingleNodeLauncher
+            # (no WrappedLauncher prefix). The worker shares the
+            # server's network namespace — no container, no
+            # interchange-connectivity problem.
+            parsl_provider = LocalProvider(
+                init_blocks=init_blocks,
+                min_blocks=min_blocks,
+                max_blocks=max_blocks,
+                nodes_per_block=nodes_per_block,
+                parallelism=parallelism,
+            )
+        else:
+            parsl_provider = LocalProvider(
+                launcher=WrappedLauncher(prepend=prepend),  # type: ignore
+                init_blocks=init_blocks,
+                min_blocks=min_blocks,
+                max_blocks=max_blocks,
+                nodes_per_block=nodes_per_block,
+                parallelism=parallelism,
+            )
     elif provider == "pbs":
         if pbs_settings is None:
             raise ValueError("PBSSettings cannot be None when provider = 'pbs'")
@@ -190,15 +231,19 @@ def generate_parsl_config(
             init_mem=k8_settings.request_mem,
         )
 
-    return Config(
-        executors=[
-            HighThroughputExecutor(
-                label="rhea-workers",
-                max_workers_per_node=max_workers_per_node,
-                provider=parsl_provider,
-                worker_debug=debug,
-                launch_cmd=launch_cmd_template,
-                worker_logdir_root="./",
-            )
-        ]
+    # The custom launch_cmd_template hardcodes the worker CONTAINER's
+    # python (/home/rhea/venv/bin/python). For the local-subprocess
+    # backend the worker IS the server's own interpreter, so let
+    # HighThroughputExecutor use its default launch_cmd
+    # (``process_worker_pool`` resolved on PATH / from sys.executable).
+    htex_kwargs: dict = dict(
+        label="rhea-workers",
+        max_workers_per_node=max_workers_per_node,
+        provider=parsl_provider,
+        worker_debug=debug,
+        worker_logdir_root="./",
     )
+    if backend != "local":
+        htex_kwargs["launch_cmd"] = launch_cmd_template
+
+    return Config(executors=[HighThroughputExecutor(**htex_kwargs)])
