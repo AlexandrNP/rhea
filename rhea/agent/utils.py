@@ -387,7 +387,21 @@ async def install_conda_env(
     # by `conda create` even for an empty env.
     _conda_shim = {"activate", "conda", "conda-env", "deactivate", "python"}
     package_binaries = [f for f in bin_files if f not in _conda_shim]
-    if not package_binaries:
+
+    # Skip the bin/-non-empty check when the tool declares ZERO
+    # package requirements. Some Galaxy tools (tp_cat, tp_head_tool,
+    # tp_tail_tool, nl, ...) wrap a system utility (`cat`, `head`,
+    # `tail`, `nl`) and have an empty `requirements: []` list — they
+    # only need a callable conda env so `conda run -n <env> <cmd>`
+    # works, not any packages inside it. For these tools the env's
+    # bin/ correctly contains ONLY the conda shim, and applying the
+    # "metadata-only" silent-failure check would flag a healthy
+    # empty env as broken AND mislead the operator with a
+    # libmambapy/libarchive remediation message (the original false-
+    # negative shape we observed 2026-05-15 on tp_cat). The check
+    # only makes sense when packages were requested but didn't land.
+    package_requirements = [r for r in requirements if r.type == "package"]
+    if not package_binaries and package_requirements:
         logger.error(
             "install_conda_env %r: post-install env at %r has NO "
             "package binaries (bin/ contents: %s). Conda likely "
