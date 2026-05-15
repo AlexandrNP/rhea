@@ -164,26 +164,158 @@ async def install_conda_env(
         stdout=PIPE, stderr=PIPE,
     )
     await rm_stale.communicate()
-    for strict in (True, False):
-        packages = requirements_to_package_list(requirements, strict=strict)
-        proc = await asyncio.create_subprocess_exec(
-            _conda, "create", "-n", env_name, "-y", *packages, stdout=PIPE, stderr=PIPE
+    # Per-call env overrides (e.g. CONDA_SOLVER=classic) accumulate
+    # across retries within this one install_conda_env call so a
+    # successful libmamba->classic recovery on the strict attempt
+    # carries through to a possible non-strict fallback later.
+    _extra_env: dict[str, str] = {}
+
+    # Galaxy-canonical channels. Rhea ingests Galaxy tools; Galaxy's
+    # `<requirement type="package">` wrappers assume bioconda
+    # (primary) + conda-forge (dependency). Passing them on the
+    # command line is additive — operators who already have these
+    # channels in `~/.condarc` lose nothing; operators with an empty
+    # condarc (or just `pkgs/main` + `pkgs/r` as on a clean Anaconda
+    # install) now actually find the tools their galaxytools table
+    # asks for. Without this, every fresh-conda operator hits a
+    # `PackagesNotFoundError` on first tool install and has no
+    # signpost telling them why.
+    #
+    # Channel priority (left-to-right): bioconda is searched FIRST,
+    # which is the Galaxy convention — biology-specific builds win
+    # over the generic conda-forge fallback. `RHEA_CONDA_EXTRA_CHANNELS`
+    # (comma-separated) prepends additional channels so operators
+    # with site-specific mirrors or private indexes can override
+    # without forking; the canonical pair always lands after them.
+    import os as _os_for_channels
+    _default_channels = ["bioconda", "conda-forge"]
+    _extra_chan_raw = _os_for_channels.environ.get("RHEA_CONDA_EXTRA_CHANNELS", "")
+    _extra_channels = [c.strip() for c in _extra_chan_raw.split(",") if c.strip()]
+    _channel_args: list[str] = []
+    for ch in [*_extra_channels, *_default_channels]:
+        _channel_args.extend(["-c", ch])
+
+    async def _try_create(spec_strict: bool) -> tuple[int, bytes, bytes, list[str]]:
+        """Run `conda create` once with the given strictness; return (rc, stdout, stderr, pkgs)."""
+        pkgs = requirements_to_package_list(requirements, strict=spec_strict)
+        import os as _os_for_env
+        sub_env = dict(_os_for_env.environ)
+        sub_env.update(_extra_env)
+        p = await asyncio.create_subprocess_exec(
+            _conda, "create", "-n", env_name, "-y", *_channel_args, *pkgs,
+            stdout=PIPE, stderr=PIPE, env=sub_env,
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode == 0:
+        out, err = await p.communicate()
+        return p.returncode, out, err, pkgs
+
+    # Two distinct families of recoverable conda failure with
+    # DIFFERENT recovery actions:
+    #
+    #   (a) Metadata corruption (`Prefix record`, `already exists`,
+    #       `Multiple packages found`) — fix is `conda clean --all`
+    #       + env remove + retry. Common on macOS when libcxx or
+    #       similar gets out of sync between local conda cache and
+    #       the env's metadata.
+    #   (b) Broken libmamba solver backend (operator's `~/.condarc`
+    #       says `solver: libmamba` but conda's libarchive/libmamba
+    #       dyld chain is broken — typical on `/opt/anaconda3`
+    #       installs after a partial homebrew upgrade). The classic
+    #       solver still works; recovery is to retry with
+    #       `CONDA_SOLVER=classic` set on the subprocess env. Running
+    #       `conda clean` would NOT help — the file is missing, not
+    #       cached-wrong.
+    _corruption_signatures = (
+        b"Prefix record",
+        b"already exists",
+        b"Multiple packages found",
+    )
+    _libmamba_signatures = (
+        b"libmamba",
+        b"libarchive",
+        b"solver backend",
+        b"libmambapy",
+    )
+
+    for strict in (True, False):
+        rc, stdout, stderr, packages = await _try_create(strict)
+
+        # Self-heal (a): conda-cache corruption. Run `conda clean
+        # --all`, remove any half-baked env, retry SAME strictness
+        # before falling back to relaxed. This avoids silently
+        # accepting a wider version range when the real problem is
+        # operator-side corruption that conda can fix on its own.
+        if rc != 0 and strict and any(sig in stderr for sig in _corruption_signatures):
+            logger.warning(
+                "install_conda_env %r: STRICT pin failed with recoverable "
+                "conda corruption (exit %s). Running `conda clean --all -y` "
+                "and retrying. Original stderr (first 300 chars): %s",
+                env_name,
+                rc,
+                stderr.decode().strip()[:300],
+            )
+            clean = await asyncio.create_subprocess_exec(
+                _conda, "clean", "--all", "-y",
+                stdout=PIPE, stderr=PIPE,
+            )
+            await clean.communicate()
+            # Also re-remove the env in case the failed create left a
+            # half-baked prefix lying around.
+            rm_again = await asyncio.create_subprocess_exec(
+                _conda, "env", "remove", "-n", env_name, "-y",
+                stdout=PIPE, stderr=PIPE,
+            )
+            await rm_again.communicate()
+            rc, stdout, stderr, packages = await _try_create(True)
+
+        # Self-heal (b): broken libmamba solver backend. Re-arm the
+        # `_extra_env` with `CONDA_SOLVER=classic` and retry. We
+        # gate this with `CONDA_SOLVER not in _extra_env` so we
+        # don't loop endlessly if the classic solver is ALSO broken
+        # (in which case the operator has a deeper conda install
+        # problem we cannot paper over).
+        if (
+            rc != 0
+            and strict
+            and "CONDA_SOLVER" not in _extra_env
+            and any(sig in stderr for sig in _libmamba_signatures)
+        ):
+            logger.warning(
+                "install_conda_env %r: STRICT pin failed because the "
+                "configured libmamba solver backend is broken on this "
+                "host (exit %s). Retrying with CONDA_SOLVER=classic so "
+                "the classic resolver overrides the operator's ~/.condarc "
+                "for this install only. To fix permanently, repair the "
+                "conda installation (typically reinstalling "
+                "conda-libmamba-solver + libarchive). Original stderr "
+                "(first 300 chars): %s",
+                env_name,
+                rc,
+                stderr.decode().strip()[:300],
+            )
+            _extra_env["CONDA_SOLVER"] = "classic"
+            # Also remove any partial env the failed solver may have
+            # half-built, so the retry starts clean.
+            rm_lm = await asyncio.create_subprocess_exec(
+                _conda, "env", "remove", "-n", env_name, "-y",
+                stdout=PIPE, stderr=PIPE,
+            )
+            await rm_lm.communicate()
+            rc, stdout, stderr, packages = await _try_create(True)
+
+        if rc == 0:
             if not strict:
                 used_fallback = True
             break
         if not strict:
             raise RuntimeError(stdout.decode().strip() + "\n" + stderr.decode().strip())
-        # Strict failed — log the failure before trying the relaxed
-        # version so the operator sees exactly what bioconda refused.
+        # Strict failed AND wasn't recoverable (or recovery didn't
+        # fix it). Log + try the relaxed spec.
         logger.warning(
             "install_conda_env %r: STRICT pin failed (conda exit %s). "
             "Falling back to non-strict (>=) spec. Strict packages were: %s. "
             "Conda stderr (first 400 chars): %s",
             env_name,
-            proc.returncode,
+            rc,
             requirements_to_package_list(requirements, strict=True),
             stderr.decode().strip()[:400],
         )
