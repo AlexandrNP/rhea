@@ -484,9 +484,45 @@ async def install_conda_env(
     # verify always), but keep the variable for future logging hooks.
     _ = used_fallback
 
-    # Pack the environment in another thread
-    future = loop.run_in_executor(None, pack_conda_env, env_name, r, n_threads)
-    asyncio.ensure_future(future)
+    # Pack the environment + populate the Redis cache. This is part
+    # of the install_conda_env contract: by the time we return, the
+    # archive MUST be in Redis under hash key `conda_envs[<env_name>]`
+    # so any other consumer (a second Tool actor, an orchestrator
+    # pre-warm in a different process, a sibling unpack call) hitting
+    # the cache sees a complete archive — never a partial one and never
+    # an empty key.
+    #
+    # The earlier implementation scheduled `pack_conda_env` via
+    # `loop.run_in_executor` and IMMEDIATELY returned without awaiting
+    # the future (the bare `asyncio.ensure_future(future)` wrapped the
+    # future as a task but did not block on it). Two real failure
+    # shapes flowed from that fire-and-forget design:
+    #
+    #   (a) **Short-lived caller race.** When `install_conda_env` runs
+    #       inside a short-lived subprocess (apecx-mcp pre-warm,
+    #       single-shot CLI), the Python interpreter exits as soon as
+    #       the calling coroutine returns. ``asyncio.run`` cancels
+    #       pending tasks and closes the loop; the pack thread may be
+    #       mid-tar-write when the process dies, leaving an empty or
+    #       partial entry in Redis. The next consumer thinks the cache
+    #       is populated (HEXISTS=1) and unpacks a broken archive.
+    #   (b) **Long-lived actor first-call race.** In the Academy actor
+    #       case (rhea/agent/tool.py), `agent_on_startup` signals
+    #       ``_startup_done`` as soon as ``install_conda_env`` returns
+    #       — so the actor reports "ready" while the pack is still
+    #       running. A second actor (or any cache reader) hitting Redis
+    #       between actor-ready and pack-complete misses the cache and
+    #       runs `conda create` again, defeating the cache's whole
+    #       purpose for that window.
+    #
+    # Awaiting the executor future closes both races. Conda-pack is
+    # now ON the critical path: when `install_conda_env` returns, the
+    # cache is fact, not promise. The wall-time cost (typically 1-10s
+    # depending on env size) is moved from "background, race-prone"
+    # to "foreground, observable" — measurable in logs, attributable
+    # to install_conda_env, and reflected in the pre-warm latency
+    # the orchestrator's status tool surfaces.
+    await loop.run_in_executor(None, pack_conda_env, env_name, r, n_threads)
 
     return packages
 
