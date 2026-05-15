@@ -133,12 +133,33 @@ class RheaToolAgent(Agent):
 
         # Otherwise, build Conda environment
         else:
-            # Create coroutine to create Conda environment and install Conda packages
+            # Create coroutine to create Conda environment and install Conda packages.
+            #
+            # The unpack target_path is configurable via $RHEA_CONDA_ENVS_DIR
+            # (defaults to /home/rhea/conda/envs — the canonical path inside
+            # Rhea's Linux container deployment, where /home/rhea is the
+            # service user's home directory).
+            #
+            # On macOS dev environments, /home is an autofs read-only mount
+            # (mkdir /home/rhea → "Operation not supported") so the unpack
+            # would fail with PermissionError, agent_on_startup would raise,
+            # the Academy actor would enter a wedged state, and every
+            # subsequent run_tool would return "Action 'run_tool' was
+            # cancelled by the agent" for the rest of the rhea-server's
+            # lifetime. The orchestrator setting RHEA_CONDA_ENVS_DIR to a
+            # writable location (e.g. $TMPDIR/apecx-rhea/conda/envs or
+            # ~/.cache/apecx-rhea/conda/envs) is what makes Rhea actually
+            # work on macOS. See apecx-mcp-integration's
+            # `infrastructure/orchestrator.py::_compose_rhea_env`.
+            envs_dir = os.environ.get(
+                "RHEA_CONDA_ENVS_DIR", "/home/rhea/conda/envs"
+            )
+            target_path = os.path.join(envs_dir, self.tool.id)
             conda_coro = install_conda_env(
                 env_name=self.tool.id,
                 requirements=self.tool.requirements.requirements,
                 r=self.connector._redis_client,
-                target_path=f"/home/rhea/conda/envs/{self.tool.id}",
+                target_path=target_path,
             )
 
             # Populate results
