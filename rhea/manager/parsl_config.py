@@ -245,5 +245,26 @@ def generate_parsl_config(
     )
     if backend != "local":
         htex_kwargs["launch_cmd"] = launch_cmd_template
+    else:
+        # PATH-leakage guard: HighThroughputExecutor's default
+        # ``interchange_launch_cmd=['interchange.py']`` is resolved
+        # via PATH. A stale Anaconda install whose
+        # ``/opt/anaconda3/bin/interchange.py`` ships an older
+        # incompatible version wins ahead of THIS venv's
+        # ``interchange.py``, and parsl crashes with cryptic kwarg
+        # errors like ``Interchange.__init__() got an unexpected
+        # keyword argument 'worker_ports'``. Resolve to an absolute
+        # path derived from THIS parsl install — the same import
+        # that just gave us HighThroughputExecutor — so PATH order
+        # cannot poison it.
+        import sys as _sys
+        from pathlib import Path as _Path
+        _python = _Path(_sys.executable)
+        _interchange = _python.parent / "interchange.py"
+        if _interchange.is_file():
+            htex_kwargs["interchange_launch_cmd"] = [str(_interchange)]
+        # If the script isn't sitting next to sys.executable (custom
+        # parsl layout), fall through to parsl's default — at worst
+        # we hit the original PATH-resolution behavior, no regression.
 
     return Config(executors=[HighThroughputExecutor(**htex_kwargs)])

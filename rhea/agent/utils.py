@@ -103,6 +103,21 @@ async def cleanup_tool_directory(dir_path: str) -> None:
         logger.warning(f"Failed to clean up {dir_path}: {e}")
 
 
+def _conda_binary() -> str:
+    """Resolve the conda binary to use for tool-env management.
+
+    Honors ``$CONDA_EXE`` (conda's official env var, set when conda is
+    initialized in the shell — the orchestrator sets it explicitly).
+    This closes the PATH-leakage failure mode where a stale Anaconda
+    install at ``/opt/anaconda3/bin/conda`` wins ahead of the real
+    miniconda whose ``envs/`` directory actually carries Rhea's tool
+    envs. The metadata-but-no-files conda-pack archive that resulted
+    is the silent-failure shape the verification below also guards.
+    """
+    import os
+    return os.environ.get("CONDA_EXE", "conda")
+
+
 async def install_conda_env(
     env_name: str,
     requirements: List[Requirement],
@@ -118,18 +133,224 @@ async def install_conda_env(
         await loop.run_in_executor(None, unpack_conda_env, env_name, r, target_path)
         return []
 
-    # Create a new environment
+    # Create a new environment.
+    #
+    # Anti-silent-failure: the legacy code fell back from strict
+    # (``pkg=ver``) to non-strict (``pkg>=ver``) WITHOUT warning the
+    # operator. For a tool whose CLI is not backward-compatible across
+    # major versions (MUSCLE 3.x vs 5.x is the canonical example;
+    # bioconda's default flipped from 3.8.1551 to 5.x), the silent
+    # fallback installs a version the Galaxy tool's <command> template
+    # cannot drive — every dispatch later returns "Invalid command
+    # line / Unknown option in" with conda's noise in front, and the
+    # operator has no idea their pin was relaxed.
+    #
+    # Now: try strict; if it fails, log a LOUD warning naming the
+    # exact failure + the relaxed spec the fallback uses; after the
+    # fallback succeeds, verify the actually-installed version matches
+    # the requested MAJOR version. A major-version mismatch is a
+    # hard FAIL-LOUD — better to leave the env uninstalled than to
+    # pretend everything is fine.
     packages: List[str] = []
+    used_fallback = False
+    # If a previous run left an empty/partial env with this name
+    # (conda's `conda create -n X -y` is a silent no-op when X already
+    # exists), tear it down first so we genuinely build from scratch.
+    # Without this, the verification below catches the empty env but
+    # only after wasting time on a no-op create.
+    _conda = _conda_binary()
+    rm_stale = await asyncio.create_subprocess_exec(
+        _conda, "env", "remove", "-n", env_name, "-y",
+        stdout=PIPE, stderr=PIPE,
+    )
+    await rm_stale.communicate()
     for strict in (True, False):
         packages = requirements_to_package_list(requirements, strict=strict)
         proc = await asyncio.create_subprocess_exec(
-            "conda", "create", "-n", env_name, "-y", *packages, stdout=PIPE, stderr=PIPE
+            _conda, "create", "-n", env_name, "-y", *packages, stdout=PIPE, stderr=PIPE
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode == 0:
+            if not strict:
+                used_fallback = True
             break
         if not strict:
             raise RuntimeError(stdout.decode().strip() + "\n" + stderr.decode().strip())
+        # Strict failed — log the failure before trying the relaxed
+        # version so the operator sees exactly what bioconda refused.
+        logger.warning(
+            "install_conda_env %r: STRICT pin failed (conda exit %s). "
+            "Falling back to non-strict (>=) spec. Strict packages were: %s. "
+            "Conda stderr (first 400 chars): %s",
+            env_name,
+            proc.returncode,
+            requirements_to_package_list(requirements, strict=True),
+            stderr.decode().strip()[:400],
+        )
+
+    # ALWAYS verify what's actually in the env. Conda's exit 0 is
+    # necessary but not sufficient — silent no-ops happen, partial
+    # downloads happen, the conda-libmamba-solver crashing on
+    # libarchive leaves an env with conda-meta but no binaries. We
+    # check:
+    #
+    #   1. every requested package is actually present in the env;
+    #   2. its installed MAJOR version matches the requested one
+    #      (``>=`` fallback can silently install a CLI-incompatible
+    #      major bump — MUSCLE 3.x → 5.x is the canonical case).
+    #
+    # Either failure tears the env down and FAIL-LOUDs so the cache
+    # doesn't serve the broken state.
+    verify_proc = await asyncio.create_subprocess_exec(
+        _conda, "list", "-n", env_name, "--json", stdout=PIPE, stderr=PIPE,
+    )
+    v_stdout, v_stderr = await verify_proc.communicate()
+    if verify_proc.returncode != 0:
+        raise RuntimeError(
+            f"install_conda_env {env_name!r}: post-install `conda list` "
+            f"verification failed (exit {verify_proc.returncode}): "
+            f"{v_stderr.decode().strip()[:400]}"
+        )
+    import json as _json  # local import — stdlib, cheap
+    installed = {pkg["name"]: pkg["version"] for pkg in _json.loads(v_stdout)}
+
+    # Conda's `list --json` reports packages whose METADATA is
+    # recorded — not whose files are actually on disk. We've observed
+    # `conda create` exit 0 + metadata claiming muscle=3.8.1551 is
+    # installed while the env's bin/ directory is empty (only
+    # conda-meta + etc; ~5KB total). The metadata path is the silent-
+    # failure shape we have to catch BEFORE packing the empty env into
+    # the Redis cache where it poisons every subsequent run.
+    #
+    # Look up the env's actual prefix via `conda info --envs --json`,
+    # check its bin/ contains at least one non-conda binary, and
+    # require its total disk size to be larger than a sanity floor.
+    info_proc = await asyncio.create_subprocess_exec(
+        _conda, "info", "--envs", "--json", stdout=PIPE, stderr=PIPE,
+    )
+    i_stdout, i_stderr = await info_proc.communicate()
+    if info_proc.returncode != 0:
+        raise RuntimeError(
+            f"install_conda_env {env_name!r}: `conda info --envs --json` "
+            f"verification failed (exit {info_proc.returncode}): "
+            f"{i_stderr.decode().strip()[:400]}"
+        )
+    info_obj = _json.loads(i_stdout)
+    env_prefix = next(
+        (p for p in info_obj.get("envs", []) if p.endswith(f"/envs/{env_name}")),
+        None,
+    )
+    if env_prefix is None:
+        raise RuntimeError(
+            f"install_conda_env {env_name!r}: env disappeared after "
+            f"`conda create` returned 0. `conda info --envs` shows: "
+            f"{info_obj.get('envs')!r}"
+        )
+    import os as _os
+    bin_dir = _os.path.join(env_prefix, "bin")
+    bin_files: list[str] = []
+    if _os.path.isdir(bin_dir):
+        bin_files = _os.listdir(bin_dir)
+    # Treat the conda-shim files as "no real install" — they're added
+    # by `conda create` even for an empty env.
+    _conda_shim = {"activate", "conda", "conda-env", "deactivate", "python"}
+    package_binaries = [f for f in bin_files if f not in _conda_shim]
+    if not package_binaries:
+        logger.error(
+            "install_conda_env %r: post-install env at %r has NO "
+            "package binaries (bin/ contents: %s). Conda likely "
+            "produced a metadata-only env (silent-failure shape — "
+            "`conda list` reports the package as installed, but the "
+            "files were never downloaded). Tearing it down so the "
+            "Redis cache does not serve a broken env.",
+            env_name,
+            env_prefix,
+            sorted(bin_files),
+        )
+        rm = await asyncio.create_subprocess_exec(
+            _conda, "env", "remove", "-n", env_name, "-y",
+            stdout=PIPE, stderr=PIPE,
+        )
+        await rm.communicate()
+        raise RuntimeError(
+            f"install_conda_env {env_name!r}: `conda create` returned 0 "
+            f"and `conda list` reports the package(s) installed, but "
+            f"{env_prefix}/bin/ contains no package binaries — only the "
+            f"conda shim. The metadata-but-no-files state is a silent "
+            f"conda failure (commonly: a libmambapy/libarchive crash in "
+            f"the system conda, or a partial offline-mode resolve). "
+            f"Check `which conda`, `conda config --show channels`, and "
+            f"that the conda binary's own dyld dependencies are intact "
+            f"(`/opt/anaconda3` installs are the usual culprit on "
+            f"macOS)."
+        )
+    for requirement in requirements:
+        if requirement.type != "package":
+            continue
+        installed_version = installed.get(requirement.value, "")
+        if not installed_version:
+            # Conda reported success but the package isn't in the env.
+            # This is the canonical conda-silent-no-op shape (env name
+            # already existed, `conda create -y` was a no-op).
+            logger.error(
+                "install_conda_env %r: post-install verification — "
+                "package %r was requested but is NOT present in the "
+                "env. Conda likely silently no-op'd a `create` against "
+                "a pre-existing env, or the install failed half-way "
+                "with a 0 exit. Tearing the env down so the cache "
+                "doesn't serve a non-functional state.",
+                env_name,
+                requirement.value,
+            )
+            rm = await asyncio.create_subprocess_exec(
+                _conda, "env", "remove", "-n", env_name, "-y",
+                stdout=PIPE, stderr=PIPE,
+            )
+            await rm.communicate()
+            raise RuntimeError(
+                f"install_conda_env {env_name!r}: package "
+                f"{requirement.value!r} was requested but is not in "
+                f"the env after `conda create` returned exit 0. "
+                f"Check that `conda env list` shows no stale {env_name!r} "
+                f"env, that bioconda is on your channels "
+                f"(`conda config --show channels`), and that "
+                f"`{requirement.value}={requirement.version}` resolves "
+                f"in your environment."
+            )
+        requested_major = (requirement.version or "").split(".", 1)[0]
+        installed_major = installed_version.split(".", 1)[0]
+        if requested_major and installed_major and requested_major != installed_major:
+            logger.error(
+                "install_conda_env %r: MAJOR version skew for %r — "
+                "Galaxy XML asked for %s, conda installed %s. "
+                "The Galaxy tool's <command> template was authored "
+                "against the requested major and will fail at "
+                "dispatch time. Removing the env so the cache "
+                "doesn't serve it.",
+                env_name,
+                requirement.value,
+                requirement.version,
+                installed_version,
+            )
+            rm = await asyncio.create_subprocess_exec(
+                _conda, "env", "remove", "-n", env_name, "-y",
+                stdout=PIPE, stderr=PIPE,
+            )
+            await rm.communicate()
+            raise RuntimeError(
+                f"install_conda_env {env_name!r}: refusing to keep a "
+                f"major-version-mismatched env. {requirement.value!r} "
+                f"requested {requirement.version!r} (major "
+                f"{requested_major!r}), conda installed "
+                f"{installed_version!r} (major {installed_major!r}). "
+                f"Either update the Galaxy tool XML to a version "
+                f"available in the configured channels, or add the "
+                f"channel that carries the requested major (e.g. "
+                f"`conda config --add channels bioconda`)."
+            )
+    # used_fallback is no longer load-bearing for verification (we
+    # verify always), but keep the variable for future logging hooks.
+    _ = used_fallback
 
     # Pack the environment in another thread
     future = loop.run_in_executor(None, pack_conda_env, env_name, r, n_threads)
@@ -222,8 +443,13 @@ async def remove_image(image: str, engine: Literal["docker", "podman"]):
 async def run_command_w_conda(
     tool_id: str, script_path: str, env: dict[str, str]
 ) -> CompletedProcess:
+    # Resolve conda binary against the spawn env (which is what carries
+    # CONDA_EXE from the orchestrator). Falling back to PATH lookup
+    # (the env's PATH, which the orchestrator composes correctly) is
+    # also safe — but explicit CONDA_EXE closes the case where a
+    # stale /opt/anaconda3/bin/conda wins via the operator's PATH.
     cmd = [
-        "conda",
+        env.get("CONDA_EXE", "conda"),
         "run",
         "-n",
         tool_id,

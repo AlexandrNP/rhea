@@ -431,7 +431,24 @@ async def main():
             case "streamable-http":
                 await mcp.run_streamable_http_async()  # TODO: Fix notification options
     finally:
-        parsl.dfk().cleanup()
+        # parsl.dfk() raises NoDataFlowKernelError if parsl.load() was
+        # never called (e.g. startup blew up before the parsl_config
+        # was loaded). Guarding the cleanup means the ORIGINAL startup
+        # failure is the one the operator sees in the log, instead of
+        # this cascading "Must first load config" red herring on top.
+        try:
+            dfk = parsl.dfk()
+        except parsl.errors.NoDataFlowKernelError:
+            # Parsl was never loaded — nothing to clean up.
+            pass
+        else:
+            try:
+                dfk.cleanup()
+            except Exception as exc:  # noqa: BLE001 — best-effort shutdown
+                print(
+                    f"Application shutdown: parsl cleanup raised "
+                    f"{type(exc).__name__}: {exc}"
+                )
         print("Application shutdown complete.")
 
 

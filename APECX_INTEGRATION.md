@@ -86,6 +86,34 @@ Aim to upstream them.
   mapping-like object via `__getitem__`, so the `__getattr__`-only
   handling was never reached; `__getitem__("value")` fell through to
   an empty `GalaxyVar` and rendered `{}`.
+- `rhea/agent/utils.py` — `install_conda_env` now (a) tears down a
+  stale named env BEFORE `conda create` (conda silently no-ops on
+  pre-existing env names + a `-y` flag — exit 0, env empty); (b) logs
+  a loud warning when the strict pin fails and the relaxed `>=` spec
+  is tried; (c) **always** verifies the env via `conda list --json`
+  after install — refusing to keep an env where the requested package
+  is missing OR its major version differs from the Galaxy XML
+  request. This closes the MUSCLE 3.x → 5.x silent-failure: bioconda's
+  default `muscle` is now v5, whose CLI is incompatible with the
+  Galaxy tool XML's command template; before this fix, the env
+  silently installed v5 and the workflow returned `Invalid command
+  line / Unknown option in` errors at dispatch.
+- `rhea/server/mcp_server.py` — the shutdown handler used to call
+  `parsl.dfk().cleanup()` unconditionally; if startup failed BEFORE
+  `parsl.load()` (port conflict, bad config, etc.) the cleanup itself
+  raised `NoDataFlowKernelError("Must first load config")`, masking
+  the original error. Now: guarded with a `try/except
+  NoDataFlowKernelError` so the operator sees the actual startup
+  error instead of the cascading red herring.
+- `rhea/manager/parsl_config.py` — for the `local` backend the
+  `HighThroughputExecutor`'s `interchange_launch_cmd` is now resolved
+  to an ABSOLUTE path derived from `sys.executable`, not the default
+  `['interchange.py']` (which goes through PATH). A stale Anaconda
+  install at `/opt/anaconda3/bin/interchange.py` wins PATH ahead of
+  Rhea's uv venv and ships an older incompatible script
+  (`TypeError: Interchange.__init__() got an unexpected keyword
+  argument 'worker_ports'`). The absolute path closes that PATH-
+  leakage failure mode.
 
 Full arc + the working host-process recipe + the verified MUSCLE
 end-to-end run:
