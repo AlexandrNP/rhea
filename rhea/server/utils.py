@@ -243,8 +243,16 @@ def create_tool(tool: Tool, ctx: Context) -> FastMCPTool:
                 await ctx.info(f"Executing tool {tool_id} in {handle.agent_id}")
                 await ctx.report_progress(0.1, 1)
 
-                # Execute tool
-                tool_result: RheaOutput = await (await handle.run_tool(rhea_params))
+                # Execute tool. Academy 0.4 unified Handle's call shape:
+                # ``handle.run_tool(...)`` is awaitable and resolves to the
+                # action's return value directly (single await). The
+                # pre-0.4 double-await pattern (a coroutine returning an
+                # awaitable Future) was retired in academy 0.4 — see
+                # the changelog. Using two awaits today raises
+                # ``object RheaOutput can't be used in 'await' expression``
+                # because the inner await already returned the concrete
+                # result.
+                tool_result: RheaOutput = await handle.run_tool(rhea_params)
 
                 await ctx.info(f"Tool {tool_id} finished in {handle.agent_id}")
                 await ctx.report_progress(1, 1)

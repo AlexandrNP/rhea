@@ -82,9 +82,15 @@ async def main():
                 # caller's exchange instead of mutating the unbound one.
                 handle: Handle = Handle(unbound_handle.agent_id, exchange=client)
 
-                packages = await (await handle.get_installed_packages())
+                # Academy 0.4: Handle action calls are single-await.
+                # The pre-0.4 double-await pattern raises
+                # "object X can't be used in 'await' expression"
+                # because the inner await already returns the concrete
+                # value. See rhea/server/utils.py for the equivalent
+                # fix on the production dispatch path.
+                packages = await handle.get_installed_packages()
 
-                tool_result = await (await handle.run_tool(rhea_params))
+                tool_result = await handle.run_tool(rhea_params)
 
                 print(packages)
 

@@ -267,4 +267,39 @@ def generate_parsl_config(
         # parsl layout), fall through to parsl's default — at worst
         # we hit the original PATH-resolution behavior, no regression.
 
+        # G86 (2026-05-16, apecx-mcp-integration session): the
+        # ``interchange.py`` fix above doesn't cover the
+        # ``process_worker_pool.py`` binary used by the worker
+        # subprocess. Same PATH-leakage shape, different binary:
+        # macOS hosts with Anaconda usually have
+        # ``/opt/anaconda3/bin/process_worker_pool.py`` from a
+        # different Parsl version. When that wins ahead of THIS
+        # venv's worker binary, the launch fails with cryptic
+        # argparse errors (e.g. Parsl 2025.06.23 server invokes the
+        # worker with ``--task_port=X --result_port=Y`` but 2025.07.07
+        # workers require ``-t X -r Y`` — the worker exits with
+        # ``the following arguments are required: -P/--port`` or
+        # similar, and the interchange reports ``Never received
+        # handle from Parsl worker.``).
+        #
+        # Fix: derive ``process_worker_pool.py``'s absolute path the
+        # same way we did for ``interchange.py`` and substitute it
+        # into Parsl's DEFAULT_LAUNCH_CMD template's first token.
+        # We preserve every placeholder Parsl's ``.format(...)`` call
+        # relies on, so the override is shape-compatible across
+        # Parsl versions.
+        _worker = _python.parent / "process_worker_pool.py"
+        if _worker.is_file():
+            from parsl.executors.high_throughput.executor import DEFAULT_LAUNCH_CMD
+            _PREFIX = "process_worker_pool.py "
+            if DEFAULT_LAUNCH_CMD.startswith(_PREFIX):
+                htex_kwargs["launch_cmd"] = (
+                    str(_worker) + " " + DEFAULT_LAUNCH_CMD[len(_PREFIX):]
+                )
+            # If Parsl's template no longer starts with the expected
+            # prefix (Parsl renamed the binary or changed the
+            # template), fall through to the PATH-leaking default —
+            # we'd rather surface the version drift than silently
+            # build an incorrect launch_cmd.
+
     return Config(executors=[HighThroughputExecutor(**htex_kwargs)])
