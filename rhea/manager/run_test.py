@@ -2,7 +2,7 @@ import asyncio
 import uuid
 from academy.exchange.redis import RedisExchangeFactory
 from academy.logging import init_logging
-from academy.handle import UnboundRemoteHandle, RemoteHandle
+from academy.handle import Handle  # 0.4: unified RemoteHandle + UnboundRemoteHandle
 from utils.schema import Tool, Param, Tests, Test, Conditional
 from utils.process import process_inputs, process_outputs
 from manager.parsl_config import generate_parsl_config
@@ -54,14 +54,16 @@ async def run_tool_tests(tool: Tool) -> List[bool]:
         minio_secure=False,
     )
 
-    unbound_handle: UnboundRemoteHandle | None = await get_handle_from_redis(
+    unbound_handle: Handle | None = await get_handle_from_redis(
         tool.id, run_id, r, timeout=30
     )
 
     if unbound_handle is None:
         raise RuntimeError("Never received handle from Parsl worker.")
 
-    handle: RemoteHandle = unbound_handle.bind_to_client(client)
+    # academy-py 0.4: bind by constructing a new Handle with the
+    # caller's exchange instead of mutating the unbound one.
+    handle: Handle = Handle(unbound_handle.agent_id, exchange=client)
 
     # Run tests
     for test in tool.tests.tests:

@@ -17,7 +17,12 @@ from proxystore.store import Store
 # Academy imports
 from academy.exchange import UserExchangeClient
 from academy.exchange.redis import RedisExchangeFactory
-from academy.handle import RemoteHandle
+# academy-py 0.4 unified RemoteHandle + UnboundRemoteHandle into a
+# single ``Handle`` class with an optional ``exchange`` field. A
+# ``Handle`` with ``exchange`` set is what the old ``RemoteHandle``
+# represented; an unbound ``Handle`` (``exchange=None``) is what
+# the old ``UnboundRemoteHandle`` represented.
+from academy.handle import Handle
 from academy.identifier import AgentId
 
 # Helper imports
@@ -173,9 +178,9 @@ class K8Settings(BaseSettings):
 class AgentState(BaseModel):
     tool_id: str
     last_accessed: float = datetime.now().timestamp()
-    _handle: RemoteHandle = PrivateAttr()
+    _handle: Handle = PrivateAttr()
 
-    def __init__(self, handle: RemoteHandle, tool_id: str, **kwargs):
+    def __init__(self, handle: Handle, tool_id: str, **kwargs):
         super().__init__(tool_id=tool_id, **kwargs)
         self._handle = handle
 
@@ -185,7 +190,7 @@ class AgentState(BaseModel):
         return self._handle
 
     @handle.setter
-    def handle(self, v: RemoteHandle):
+    def handle(self, v: Handle):
         self._handle = v
         self.last_accessed = datetime.now().timestamp()
 

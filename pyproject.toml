@@ -5,15 +5,12 @@ description = "A scalable MCP (Model Context Protocol) tool framework to serve t
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # Pinned to 0.2.x — academy-py 0.3.0 removed `RemoteHandle` from
-    # `academy.handle` (rhea/server/schema.py + rhea/server/utils.py
-    # both import it). Bumping to 0.3+ requires a migration to
-    # whatever replaced RemoteHandle (likely the new BoundExchange
-    # API). Discovered 2026-05-16 when the first CI run on a fresh
-    # ubuntu-latest runner pulled academy-py 0.4.0 (the >=0.2.0
-    # range was too loose) and pytest collection exploded with
-    # ImportError. Pin tight until the migration ships.
-    "academy-py>=0.2.0,<0.3",
+    # academy-py 0.4 migration completed 2026-05-16: unified Handle
+    # replaces RemoteHandle + UnboundRemoteHandle; `bind_to_client`
+    # replaced by ``Handle(unbound.agent_id, exchange=client)``.
+    # All 4 call sites in rhea/server/{schema,utils}.py and
+    # rhea/manager/{run,run_test,utils}.py updated.
+    "academy-py>=0.4,<0.5",
     "asyncpg>=0.30.0",
     "black>=25.1.0",
     "cachetools>=6.1.0",

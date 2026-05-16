@@ -27,8 +27,12 @@ from proxystore.connectors.redis import RedisKey
 from proxystore.store import Store
 from redis import Redis
 
-# Academy imports
-from academy.handle import UnboundRemoteHandle, RemoteHandle
+# Academy imports — academy-py 0.4 unified RemoteHandle +
+# UnboundRemoteHandle into a single ``Handle`` class. Cross-process
+# pickle round-trips deposit a Handle whose ``exchange`` is None;
+# bind to a fresh exchange via ``Handle(unbound.agent_id,
+# exchange=client)`` instead of the old ``unbound.bind_to_client(client)``.
+from academy.handle import Handle
 
 
 def construct_params(inputs: Inputs) -> List[Parameter]:
@@ -180,14 +184,15 @@ def create_tool(tool: Tool, ctx: Context) -> FastMCPTool:
 
                 if tool_id not in ctx.request_context.lifespan_context.agents:
                     # First, quickly check if the agent exists in other contexts
-                    unbound_handle: UnboundRemoteHandle | None = (
-                        await get_handle_from_redis(tool.id, run_id, r, timeout=1)
+                    unbound_handle: Handle | None = await get_handle_from_redis(
+                        tool.id, run_id, r, timeout=1
                     )
 
                     # Another context already initialized this tool, bind it to this Academy client:
                     if unbound_handle is not None:
-                        handle: RemoteHandle = unbound_handle.bind_to_client(
-                            ctx.request_context.lifespan_context.academy_client
+                        handle: Handle = Handle(
+                            unbound_handle.agent_id,
+                            exchange=ctx.request_context.lifespan_context.academy_client,
                         )
                         ctx.request_context.lifespan_context.agents[tool_id] = (
                             AgentState(tool_id=tool_id, handle=handle)
@@ -207,13 +212,11 @@ def create_tool(tool: Tool, ctx: Context) -> FastMCPTool:
                             minio_secure=False,
                         )
 
-                        unbound_handle: UnboundRemoteHandle | None = (
-                            await get_handle_from_redis(
-                                tool.id,
-                                run_id,
-                                r,
-                                timeout=settings.agent_handle_timeout,
-                            )
+                        unbound_handle: Handle | None = await get_handle_from_redis(
+                            tool.id,
+                            run_id,
+                            r,
+                            timeout=settings.agent_handle_timeout,
                         )
 
                         if unbound_handle is None:
@@ -221,8 +224,9 @@ def create_tool(tool: Tool, ctx: Context) -> FastMCPTool:
                                 "Never received handle from Parsl worker."
                             )
 
-                        handle: RemoteHandle = unbound_handle.bind_to_client(
-                            ctx.request_context.lifespan_context.academy_client
+                        handle: Handle = Handle(
+                            unbound_handle.agent_id,
+                            exchange=ctx.request_context.lifespan_context.academy_client,
                         )
 
                         await ctx.info(f"Lanched agent {handle.agent_id}")
@@ -232,7 +236,7 @@ def create_tool(tool: Tool, ctx: Context) -> FastMCPTool:
                         )
 
                 # Get handle from dictionary
-                handle: RemoteHandle = ctx.request_context.lifespan_context.agents[
+                handle: Handle = ctx.request_context.lifespan_context.agents[
                     tool_id
                 ].handle
 
