@@ -4,8 +4,6 @@ FROM ghcr.io/astral-sh/uv:python3.10-bookworm-slim
 
 WORKDIR /app
 
-COPY . /app/
-
 # Install "docker" command into the container
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins /usr/local/libexec/docker/cli-plugins
@@ -31,7 +29,8 @@ ENV HOST=0.0.0.0
 # determinism wire) does NOT need conda; this is baked for tool-execution
 # completeness so a fully-deterministic run works inside the container.
 # Miniforge ships `conda` + the conda-forge default channel; bioconda is
-# requested per-tool by rhea at env-build time.
+# requested per-tool by rhea at env-build time. Installed BEFORE the source
+# COPY so a source edit does not force a multi-minute conda re-download.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -39,7 +38,8 @@ RUN apt-get update \
     && curl -fsSL "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${ARCH}.sh" -o /tmp/miniforge.sh \
     && bash /tmp/miniforge.sh -b -p /opt/conda \
     && rm -f /tmp/miniforge.sh \
-    && /opt/conda/bin/conda clean -afy
+    && /opt/conda/bin/conda clean -afy \
+    && mkdir -p /opt/rhea-conda/envs
 
 # conda on PATH + the canonical $CONDA_EXE the rhea agent resolves
 # (rhea/agent/utils.py::_conda_binary). A writable per-tool envs dir that
@@ -48,7 +48,8 @@ RUN apt-get update \
 ENV PATH=/opt/conda/bin:$PATH
 ENV CONDA_EXE=/opt/conda/bin/conda
 ENV RHEA_CONDA_ENVS_DIR=/opt/rhea-conda/envs
-RUN mkdir -p /opt/rhea-conda/envs
+
+COPY . /app/
 
 RUN uv sync --locked
 

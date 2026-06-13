@@ -249,12 +249,20 @@ async def find_tools(query: str, ctx: Context) -> List[MCPTool]:
     for t in tools:
         tool_function: FastMCPTool = create_tool(t, ctx)
 
-        # Add tool to MCP server
+        # Add tool to MCP server. Forward the ToolAnnotations create_tool
+        # built — WITHOUT this the E2-R apecx_provenance determinism block
+        # (tool version, container refs, the file-vs-JSON file_input_args
+        # discriminator) is silently DROPPED, and tools/list serves a
+        # null-annotation tool: a discovery client then synthesizes an
+        # @unpinned R3 step + cannot resolve file-vs-JSON. add_tool_to_context
+        # and list_tools already accept/surface annotations; only this call
+        # site failed to pass them through.
         mcp.add_tool_to_context(
             fn=tool_function.fn,
             name=tool_function.name,
             title=tool_function.title,
             description=tool_function.description,
+            annotations=tool_function.annotations,
         )
 
         # Add documentation resource to MCP server
