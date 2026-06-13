@@ -37,7 +37,14 @@ dependencies = [
     "parsl>=2025.6.23",
     "pgvector>=0.4.1",
     "prometheus-client>=0.22.1",
-    "proxystore[all]>=0.8.2",
+    # proxystore[redis] (NOT [all]): rhea-server + agent use ONLY the
+    # Redis connector + core Store (verified: every proxystore import in
+    # rhea/ is proxystore.connectors.redis.RedisConnector / .store). The
+    # [all] extra dragged in aiortc -> av (WebRTC, unused), and av 14.4.0
+    # ships sdist-only on this lock — it source-builds and REQUIRES
+    # ffmpeg 7, which Debian bookworm (the uv base image) does not carry,
+    # breaking `docker build`. Narrowing to [redis] drops av entirely.
+    "proxystore[redis]>=0.8.2",
     "psycopg2-binary>=2.9.10",
     "pymdown-extensions>=10.16.1",
     "pyright>=1.1.403",
