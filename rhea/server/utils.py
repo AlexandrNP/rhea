@@ -12,9 +12,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 from mcp.server.fastmcp import Context
 from mcp.server.fastmcp.tools import Tool as FastMCPTool
 from mcp.server.fastmcp.resources import FunctionResource
+from mcp.types import ToolAnnotations
 
 # Helper imports
 from rhea.utils.schema import Tool, Inputs
+from rhea.extensions.apecx_utd_extension.provenance_annotations import (
+    APECX_PROVENANCE_KEY,
+    build_apecx_provenance,
+)
 from rhea.server.schema import MCPOutput, MCPDataOutput, Settings, AgentState
 from rhea.agent.schema import RheaParam, RheaOutput
 from rhea.utils.models import get_galaxytool_by_id
@@ -296,6 +301,25 @@ def create_tool(tool: Tool, ctx: Context) -> FastMCPTool:
     fn.__annotations__ = {p.name: p.annotation for p in params}
     fn.__annotations__["return"] = MCPOutput
 
+    # E2-R Priority 2: surface the determinism/provenance pins (tool
+    # version, requirements, container refs, version_command, and the
+    # file-vs-JSON discriminator file_input_args) onto the MCP annotations
+    # so tools/list carries them to a nanobrain discovery client.
+    # ToolAnnotations is extra-allow, so the apecx block does not break the
+    # MCP schema. Building this must never break tool creation, so a
+    # malformed/edge-case Tool degrades to a title-only annotation.
+    try:
+        annotations = ToolAnnotations(
+            title=tool.name,
+            **{APECX_PROVENANCE_KEY: build_apecx_provenance(tool)},
+        )
+    except Exception:  # noqa: BLE001 — annotations are best-effort metadata
+        annotations = ToolAnnotations(title=tool.name)
+
     return FastMCPTool.from_function(
-        fn=fn, name=safe_name, title=tool.name, description=tool.description
+        fn=fn,
+        name=safe_name,
+        title=tool.name,
+        description=tool.description,
+        annotations=annotations,
     )
