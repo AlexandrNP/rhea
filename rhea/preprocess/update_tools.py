@@ -45,6 +45,7 @@ import xml.etree.ElementTree as ET
 from typing import List, Dict, Optional
 
 from openai import OpenAI
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     AsyncEngine,
@@ -58,7 +59,7 @@ from rhea.preprocess.utils.fetch import (
 )
 from rhea.preprocess.utils.process_xml import classify_xml_type
 from rhea.utils.schema import Tool
-from rhea.utils.models import GalaxyTool, get_all_tool_ids
+from rhea.utils.models import Base, GalaxyTool, get_all_tool_ids
 from rhea.utils.embedding import generate_tool_documentation_embedding
 
 logging.basicConfig(level=logging.INFO)
@@ -209,6 +210,13 @@ async def main() -> None:
         bind=engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
     )
     embedding_client = OpenAI(base_url=embedding_url, api_key=embedding_key)
+
+    # Self-migrate before ingesting: a fresh database (e.g. a recreated postgres container) has
+    # no schema, so ingestion would fail with `relation "galaxytools" does not exist`. Create the
+    # pgvector extension + the galaxytools table if absent. Idempotent — a no-op when present.
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.run_sync(Base.metadata.create_all)
 
     repos = get_candidate_repos(only=only)
     if only is None and limit > 0:
