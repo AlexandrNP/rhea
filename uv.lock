@@ -30,6 +30,15 @@ wheels = [
 ]
 
 [[package]]
+name = "aiofiles"
+version = "25.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/c3/534eac40372d8ee36ef40df62ec129bee4fdb5ad9706e58a29be53b2c970/aiofiles-25.1.0.tar.gz", hash = "sha256:a8d728f0a29de45dc521f18f07297428d56992a742f0cd2701ba86e44d23d5b2", size = 46354, upload-time = "2025-10-09T20:51:04.358Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/8a/340a1555ae33d7354dbca4faa54948d76d89a27ceef032c8c3bc661d003e/aiofiles-25.1.0-py3-none-any.whl", hash = "sha256:abe311e527c862958650f9438e859c1fa7568a141b22abcd015e120e86a85695", size = 14668, upload-time = "2025-10-09T20:51:03.174Z" },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3259,9 +3268,10 @@ wheels = [
 [[package]]
 name = "rhea-mcp"
 version = "0.1.1b5"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "academy-py" },
+    { name = "aiofiles" },
     { name = "asyncpg" },
     { name = "black" },
     { name = "cachetools" },
@@ -3290,6 +3300,7 @@ dependencies = [
     { name = "prometheus-client" },
     { name = "proxystore", extra = ["redis"] },
     { name = "psycopg2-binary" },
+    { name = "pydantic-settings" },
     { name = "pymdown-extensions" },
     { name = "pyright" },
     { name = "pytest" },
@@ -3308,6 +3319,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "academy-py", specifier = ">=0.4,<0.5" },
+    { name = "aiofiles", specifier = ">=23.0.0" },
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "black", specifier = ">=25.1.0" },
     { name = "cachetools", specifier = ">=6.1.0" },
@@ -3336,6 +3348,7 @@ requires-dist = [
     { name = "prometheus-client", specifier = ">=0.22.1" },
     { name = "proxystore", extras = ["redis"], specifier = ">=0.8.2" },
     { name = "psycopg2-binary", specifier = ">=2.9.10" },
+    { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pymdown-extensions", specifier = ">=10.16.1" },
     { name = "pyright", specifier = ">=1.1.403" },
     { name = "pytest", specifier = ">=8.4.1" },

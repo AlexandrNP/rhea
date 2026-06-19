@@ -44,6 +44,8 @@ from rhea.utils.schema import Tool
 from rhea.utils.embedding import get_embedding, get_l2_distance
 from rhea.utils.proxy import RheaFileHandle, RheaFileProxy
 from rhea.manager.parsl_config import generate_parsl_config
+from rhea.agent.utils import TOOL_FILES_BUCKET
+from minio import Minio
 
 # ProxyStore imports
 from proxystore.connectors.redis import RedisConnector, RedisKey
@@ -148,6 +150,54 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
 REGISTRY.register(metrics.RedisHashCollector(connector._redis_client, "conda_envs"))
 
 
+_bucket_ensured = False
+
+
+def _ensure_tool_files_bucket() -> None:
+    """Guarantee the per-tool object-store bucket exists before any tool runs.
+
+    The agent's ``configure_tool_directory`` lists ``TOOL_FILES_BUCKET`` during
+    startup; on a fresh or wiped MinIO the bucket is absent and ``list_objects``
+    raises ``S3Error: NoSuchBucket``, which kills the agent WHILE STARTING. The
+    manager then only sees the opaque ``Never received handle from Parsl
+    worker`` / ``PingCancelledError`` — a silent-failure shape that hides the
+    real cause. Creating the bucket here (idempotent) makes a script-less tool
+    (e.g. MUSCLE) work out of the box and turns a missing-script tool into an
+    honest empty-directory error at tool-exec time rather than a cryptic
+    startup crash. Best-effort but LOUD: a MinIO that is unreachable at boot is
+    logged at WARNING with the consequence; the server still starts (MinIO may
+    come up later), and the agent will surface a clear error if it is still
+    missing at first tool call.
+    """
+    global _bucket_ensured
+    if _bucket_ensured:
+        return
+    try:
+        client = Minio(
+            settings.minio_endpoint,
+            access_key=settings.minio_access_key,
+            secret_key=settings.minio_secret_key,
+            secure=False,
+        )
+        if not client.bucket_exists(TOOL_FILES_BUCKET):
+            client.make_bucket(TOOL_FILES_BUCKET)
+            logging.getLogger(__name__).info(
+                "Created MinIO tool-files bucket %r at %s",
+                TOOL_FILES_BUCKET,
+                settings.minio_endpoint,
+            )
+        _bucket_ensured = True
+    except Exception as e:  # noqa: BLE001 — bucket-ensure must not block boot
+        logging.getLogger(__name__).warning(
+            "Could not ensure MinIO tool-files bucket %r at %s (%s). Tool "
+            "execution will FAIL with NoSuchBucket until MinIO is reachable "
+            "and this bucket exists.",
+            TOOL_FILES_BUCKET,
+            settings.minio_endpoint,
+            e,
+        )
+
+
 @asynccontextmanager
 async def app_lifespan(server: RheaFastMCP) -> AsyncIterator[AppContext]:
     # Initialize on each new connection
@@ -155,6 +205,8 @@ async def app_lifespan(server: RheaFastMCP) -> AsyncIterator[AppContext]:
 
     academy_client: Optional[UserExchangeClient] = None
     try:
+        _ensure_tool_files_bucket()
+
         embedding_client = OpenAI(
             base_url=settings.embedding_url, api_key=settings.embedding_key
         )

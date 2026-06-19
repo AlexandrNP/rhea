@@ -19,6 +19,15 @@ from redis import StrictRedis
 
 logger = logging.getLogger(__name__)
 
+# Object-store bucket holding per-tool wrapper files (keyed by ``<tool_id>/``).
+# The agent reads it during startup (configure_tool_directory). The server
+# ensures it exists at boot (rhea/server/mcp_server.py imports this) so a fresh
+# or wiped MinIO does not crash agent startup with a NoSuchBucket S3Error —
+# which manifested as the opaque ``Never received handle from Parsl worker`` /
+# ``PingCancelledError`` (the agent exits while starting). Single source of
+# truth for the bucket name; do not re-hardcode "dev" elsewhere.
+TOOL_FILES_BUCKET = "dev"
+
 
 def requirements_to_package_list(
     requirements: List[Requirement], strict: bool = True
@@ -78,12 +87,14 @@ async def configure_tool_directory(tool_id: str, minio: Minio) -> str:
     prefix = f"{tool_id}/"
 
     objs = await asyncio.to_thread(
-        lambda: list(minio.list_objects("dev", prefix=prefix, recursive=True))
+        lambda: list(minio.list_objects(TOOL_FILES_BUCKET, prefix=prefix, recursive=True))
     )
     logger.info(f"Pulling {len(objs)} objects.")
 
     tasks = [
-        asyncio.create_task(_fetch_and_write(minio, "dev", obj, dest_dir, prefix))
+        asyncio.create_task(
+            _fetch_and_write(minio, TOOL_FILES_BUCKET, obj, dest_dir, prefix)
+        )
         for obj in objs
     ]
 

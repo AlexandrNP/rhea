@@ -11,6 +11,12 @@ dependencies = [
     # All 4 call sites in rhea/server/{schema,utils}.py and
     # rhea/manager/{run,run_test,utils}.py updated.
     "academy-py>=0.4,<0.5",
+    # aiofiles: imported by rhea/agent/utils.py::configure_tool_directory
+    # (async tool-file staging from MinIO). Was UNDECLARED — the host dev
+    # venv carried it transitively, masking the gap, but a clean `uv sync`
+    # (the Docker build) omitted it and the Parsl worker crashed with
+    # `ModuleNotFoundError: No module named 'aiofiles'` during agent startup.
+    "aiofiles>=23.0.0",
     "asyncpg>=0.30.0",
     "black>=25.1.0",
     "cachetools>=6.1.0",
@@ -46,6 +52,10 @@ dependencies = [
     # breaking `docker build`. Narrowing to [redis] drops av entirely.
     "proxystore[redis]>=0.8.2",
     "psycopg2-binary>=2.9.10",
+    # pydantic-settings: rhea/server/schema.py::Settings subclasses
+    # pydantic_settings.BaseSettings. Was relied on transitively (via
+    # fastapi/mcp); declared explicitly so a clean install cannot drop it.
+    "pydantic-settings>=2.0.0",
     "pymdown-extensions>=10.16.1",
     "pyright>=1.1.403",
     "pytest>=8.4.1",
@@ -60,6 +70,18 @@ dependencies = [
     "trio>=0.30.0",
     "zstandard>=0.23.0",
 ]
+
+# Without a [build-system] table, uv treats this project as VIRTUAL: it
+# installs the dependencies but never builds/installs `rhea` itself, so the
+# package is importable only from the repo root (CWD on sys.path). That is
+# invisible for the server (CWD=/app) but FATAL for the Parsl worker
+# subprocess, which runs from a different CWD and crashes with
+# `ModuleNotFoundError: No module named 'rhea'`. Declaring the build backend
+# makes `uv sync` install rhea into the venv site-packages, so any
+# subprocess (worker, conda run, tests) can import it regardless of CWD.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
