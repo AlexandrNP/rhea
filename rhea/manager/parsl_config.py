@@ -176,10 +176,23 @@ def generate_parsl_config(
             # (no WrappedLauncher prefix). The worker shares the
             # server's network namespace — no container, no
             # interchange-connectivity problem.
+            #
+            # FIXED single non-scaling pool for the local backend. rhea hosts
+            # each tool's Academy agent as an INFINITE-loop ``launch_agent``
+            # python_app (it never returns — it runs the agent heartbeat for
+            # the agent's lifetime). Parsl's autoscaling strategy is built for
+            # apps that COMPLETE; long-lived apps that permanently occupy a
+            # worker make the strategy spawn block after block without reaping
+            # them, leaking ~one process_worker_pool (+~90 MB) per call until
+            # the server OOMs (observed: 25 pools / >2 GB anon after a handful
+            # of calls). A FIXED pool (init=min=max=1, scaling disabled) caps it:
+            # one process_worker_pool with ``max_workers_per_node`` slots hosts
+            # that many concurrent tool agents — enough for single-machine use —
+            # and Parsl can neither add nor remove blocks, so nothing leaks.
             parsl_provider = LocalProvider(
-                init_blocks=init_blocks,
-                min_blocks=min_blocks,
-                max_blocks=max_blocks,
+                init_blocks=1,
+                min_blocks=1,
+                max_blocks=1,
                 nodes_per_block=nodes_per_block,
                 parallelism=parallelism,
             )
@@ -302,4 +315,16 @@ def generate_parsl_config(
             # we'd rather surface the version drift than silently
             # build an incorrect launch_cmd.
 
-    return Config(executors=[HighThroughputExecutor(**htex_kwargs)])
+    # Disable Parsl's autoscaling strategy for the local backend. rhea's
+    # ``launch_agent`` apps are INFINITE-loop agent hosts that never complete;
+    # the autoscaler ('simple'/'htex_auto_scale') reads them as a permanent
+    # task backlog and scales out block after block — and it does NOT honor
+    # ``max_blocks`` here (observed: 12 "Scaling out" events / 12 worker pools
+    # despite max_blocks=1), leaking ~90 MB per pool until OOM. ``strategy=
+    # 'none'`` turns the scaler off entirely, so the fixed init_blocks=1 pool is
+    # all that runs. HPC providers (pbs/k8) keep the default 'simple' strategy —
+    # there, apps DO complete and autoscaling is desirable.
+    config_kwargs: dict = {"executors": [HighThroughputExecutor(**htex_kwargs)]}
+    if backend == "local":
+        config_kwargs["strategy"] = "none"
+    return Config(**config_kwargs)
