@@ -38,16 +38,24 @@ RUN apt-get update \
     && curl -fsSL "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${ARCH}.sh" -o /tmp/miniforge.sh \
     && bash /tmp/miniforge.sh -b -p /opt/conda \
     && rm -f /tmp/miniforge.sh \
-    && /opt/conda/bin/conda clean -afy \
-    && mkdir -p /opt/rhea-conda/envs
+    && /opt/conda/bin/conda clean -afy
 
 # conda on PATH + the canonical $CONDA_EXE the rhea agent resolves
-# (rhea/agent/utils.py::_conda_binary). A writable per-tool envs dir that
-# is NOT /home/rhea (which does not exist as a writable path in this
-# image) — rhea/agent/tool.py reads $RHEA_CONDA_ENVS_DIR.
+# (rhea/agent/utils.py::_conda_binary).
+#
+# RHEA_CONDA_ENVS_DIR is the unpack target for a CACHED per-tool conda env
+# (rhea/agent/utils.py::install_conda_env -> unpack_conda_env). It MUST be
+# conda's DEFAULT named-env dir (/opt/conda/envs), because the tool RUN step
+# (rhea/agent/tool.py: `conda run -n <tool.id>`) resolves the env BY NAME via
+# conda's envs_dirs. A separate dir (the old /opt/rhea-conda/envs) only worked
+# on a COLD build in the same container — `conda create -n <tool>` writes to
+# /opt/conda/envs, which `conda run -n` then finds — but on a FRESH container
+# with a WARM Redis conda_envs cache (the orchestrator's 2nd-start shape) the
+# env unpacks to RHEA_CONDA_ENVS_DIR while `conda run -n` looks in /opt/conda/envs
+# -> EnvironmentLocationNotFound. Unifying the two paths fixes the warm-cache run.
 ENV PATH=/opt/conda/bin:$PATH
 ENV CONDA_EXE=/opt/conda/bin/conda
-ENV RHEA_CONDA_ENVS_DIR=/opt/rhea-conda/envs
+ENV RHEA_CONDA_ENVS_DIR=/opt/conda/envs
 
 COPY . /app/
 
