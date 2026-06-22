@@ -59,6 +59,11 @@ ENV RHEA_CONDA_ENVS_DIR=/opt/conda/envs
 
 COPY . /app/
 
+# Raise uv's HTTP timeout from the 30s default: `uv sync` downloads the full
+# Parsl/Academy/proxystore dependency closure, and on a slow/contended network
+# a single package (trio, psutil, …) routinely exceeds 30s and fails the build.
+# 120s makes the build robust to slow networks without masking a real hang.
+ENV UV_HTTP_TIMEOUT=120
 RUN uv sync --locked
 
 CMD ["uv", "run", "-m", "rhea.server.mcp_server", "--transport", "streamable-http"]
