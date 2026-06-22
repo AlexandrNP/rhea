@@ -198,6 +198,54 @@ def _ensure_tool_files_bucket() -> None:
         )
 
 
+_academy_swept = False
+
+# Academy's Redis exchange registers each entity (user client / agent) under
+# active:<uid>, queue:<uid>, agent:<uid> (+ rhea adds agent_handle:<run_id>-<tool>),
+# and NEVER deletes them: terminate() flips active:<uid> to INACTIVE (a deliberate
+# tombstone, no TTL) and a hard-killed server leaves them stuck ACTIVE. Across
+# server restarts on a shared Redis these are pure UNUSED accumulation.
+_STALE_ACADEMY_PREFIXES = ("active:", "queue:", "agent:", "agent_handle:")
+
+
+def _sweep_stale_academy_keys() -> None:
+    """Delete UNUSED academy-exchange keys left by DEAD prior rhea servers.
+
+    Run ONCE per process, BEFORE this server registers its own academy client
+    (created later in app_lifespan) and before any tool agent launches (lazy, on
+    first call). At that point EVERY existing academy-exchange key belongs to a
+    dead prior server, so it is unused and safe to delete; the current server's
+    keys do not exist yet. Assumes one rhea server per Redis (the apecx
+    deployment) — a second concurrent server would have its keys swept (documented,
+    not a supported topology). Leaves conda_envs (warm-start cache) and
+    file:<uuid> (per-call ProxyStore, reclaimed by RheaFileToolStep) untouched.
+    Best-effort + LOUD; never blocks boot.
+    """
+    global _academy_swept
+    if _academy_swept:
+        return
+    _academy_swept = True
+    try:
+        client = connector._redis_client
+        deleted = 0
+        for prefix in _STALE_ACADEMY_PREFIXES:
+            keys = list(client.scan_iter(match=prefix + "*", count=1000))
+            for i in range(0, len(keys), 500):
+                deleted += client.delete(*keys[i : i + 500])
+        if deleted:
+            logging.getLogger(__name__).info(
+                "Swept %d stale academy-exchange key(s) (dead prior-server "
+                "registrations) from Redis at startup.",
+                deleted,
+            )
+    except Exception as e:  # noqa: BLE001 — sweep must not block boot
+        logging.getLogger(__name__).warning(
+            "Could not sweep stale academy-exchange keys (%s). They are harmless "
+            "(tiny status keys; cleared on any Redis restart) but accumulate.",
+            e,
+        )
+
+
 @asynccontextmanager
 async def app_lifespan(server: RheaFastMCP) -> AsyncIterator[AppContext]:
     # Initialize on each new connection
@@ -206,6 +254,9 @@ async def app_lifespan(server: RheaFastMCP) -> AsyncIterator[AppContext]:
     academy_client: Optional[UserExchangeClient] = None
     try:
         _ensure_tool_files_bucket()
+        # Reclaim dead prior-server academy registrations BEFORE creating this
+        # server's own academy client below (so we never sweep a live key).
+        _sweep_stale_academy_keys()
 
         embedding_client = OpenAI(
             base_url=settings.embedding_url, api_key=settings.embedding_key
